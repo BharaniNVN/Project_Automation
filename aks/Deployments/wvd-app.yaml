@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: app
+  name: app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: app
+    spec:
+      containers:
+      - image: 
+        name: app
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+          - name: application-properties
+            mountPath: /app/config
+      volumes:
+        - name: application-properties
+          secret:
+            secretName: application-properties
+
+      initContainers:
+      - name: wait-for-mysql
+        image: busybox
+        command: ["sh", "-c", "until ping -c 1 -W 1 wvd-mysql > /dev/null; do echo Waiting for MySQL to be ready.; sleep 2; done;"]
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: app-svc
+  name: app-svc
+spec:
+  selector:
+    app.kubernetes.io/name: app
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
