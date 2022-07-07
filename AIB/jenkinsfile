@@ -1,0 +1,92 @@
+#!/usr/bin/env groovy
+@Library("com.optum.jenkins.pipeline.library@master") _
+
+import org.apache.commons.io.FileUtils
+import org.apache.commons.io.filefilter.WildcardFileFilter
+
+def updateVersion() {
+  def props = readJSON(file: 'buildProperties.json')
+  props['version'] = props['version'] + '.' + env.BUILD_NUMBER
+  env.VERSION = props['version']
+  writeJSON(file: 'buildProperties.json', json: props, pretty: 4)
+}
+
+def initialize() {
+  checkout scm
+  updateVersion()
+}
+
+pipeline {
+  agent none
+
+  options {
+    disableConcurrentBuilds()
+    skipStagesAfterUnstable()
+    buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
+    parallelsAlwaysFailFast()
+  }
+
+  environment {
+    SHARED_MODULES_BRANCH = 'latest'
+  }
+  
+      //triggers {
+    //    pollSCM('H */5 * * *')
+    //}
+
+    stages {
+        stage('DEVELOP') {
+            agent { label 'docker-kitchensink-slave' }
+          environment {
+                AZURE_CREDENTIALS       = 'ps_nhi-iac-uap-dev-sp'
+                STATE_LOCATION          = 'eastus2'
+            }
+      stages {
+        //stage('CleanWorkspace') {
+          //steps {
+            //echo 'skipping cleanup'
+          //}
+        //}
+        stage('Generate Plan') {
+          steps {
+            initialize()
+          }
+        }
+        stage('Build') {
+          steps {
+           script {
+                    withCredentials([azureServicePrincipal(
+                            credentialsId: env.AZURE_CREDENTIALS,
+                            subscriptionIdVariable: 'ARM_SUBSCRIPTION_ID',
+                            clientIdVariable: 'ARM_CLIENT_ID',
+                            clientSecretVariable: 'ARM_CLIENT_SECRET',
+                            tenantIdVariable: 'ARM_TENANT_ID')
+                    ]) {
+                        pwsh label: "Build ARM template", script: """
+                        ./build.PS1 -ARM_SUBSCRIPTION_ID $ARM_SUBSCRIPTION_ID -ARM_CLIENT_ID $ARM_CLIENT_ID -ARM_CLIENT_SECRET $ARM_CLIENT_SECRET -ARM_TENANT_ID $ARM_TENANT_ID 
+                        """
+                      }
+                }
+          }
+        }
+        stage('Deploy') {
+          steps {
+           script {
+                    withCredentials([azureServicePrincipal(
+                            credentialsId: env.AZURE_CREDENTIALS,
+                            subscriptionIdVariable: 'ARM_SUBSCRIPTION_ID',
+                            clientIdVariable: 'ARM_CLIENT_ID',
+                            clientSecretVariable: 'ARM_CLIENT_SECRET',
+                            tenantIdVariable: 'ARM_TENANT_ID')
+                    ]) {
+                        pwsh """
+                        write-output("Deploy Step")
+                          """
+                      }
+                }
+          }
+        }
+       }
+        }
+    }
+  }
