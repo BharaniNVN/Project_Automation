@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: wvd-ui-ingress
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  rules:
+  - http:
+      paths:
+      - backend:
+          serviceName: wvd-app-svc
+          servicePort: 8080
+        path: /(wvd)(/|$)(.*)
+      - backend:
+          serviceName: wvd-ui-svc
+          servicePort: 80
+        path: /(.*)
+  tls:
+  - hosts:
+    - wvd-phoenixdev.optum.com
+    secretName: tls-secret
