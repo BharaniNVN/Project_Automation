@@ -1,0 +1,226 @@
+#!/usr/bin/env groovy
+import org.apache.commons.io.FileUtils
+import org.apache.commons.io.filefilter.WildcardFileFilter
+
+@Library('com.optum.jenkins.pipeline.library@master') _
+
+def initialise() {
+    //cleanWs()
+    checkout scm
+    updateVersion()
+    sh label: "Change setup.sh permission", script: """
+        chmod 755 setup.sh
+    """
+    sh label: "Change setup.sh permission", script: """
+        chmod 755 deploy.sh
+    """
+    sh label: "SETUP Environment", script: """
+        ./setup.sh ${env.SHARED_MODULES_BRANCH}
+    """
+    pwsh label: "Download powershell wvd module", script: """
+        ./module.ps1
+    """
+}
+
+def updateVersion() {
+    def props = readJSON(file: 'build_properties.json')
+    props['version'] = props['version'] + '.' + env.BUILD_NUMBER
+    env.VERSION = props['version']
+    writeJSON(file: 'build_properties.json', json: props, pretty: 4)
+}
+//This is to generate the plan before the deployment.
+
+def runPlan(envName) {
+    withCredentials([azureServicePrincipal(
+            credentialsId: env.AZURE_CREDENTIALS,
+            subscriptionIdVariable: 'ARM_SUBSCRIPTION_ID',
+            clientIdVariable: 'ARM_CLIENT_ID',
+            clientSecretVariable: 'ARM_CLIENT_SECRET',
+            tenantIdVariable: 'ARM_TENANT_ID'
+    )]) {
+        sh label: "DEPLOY resources to AZURE", script: """
+            export PATH=${env.TERRAFORM_TOOL}:${env.PATH}
+            ./plan.sh ${env.ARM_SUBSCRIPTION_ID} ${env.ARM_CLIENT_ID} ${env.ARM_CLIENT_SECRET} ${env.ARM_TENANT_ID} ${envName} \
+                ${env.STATE_LOCATION} ${env.STATE_RESOURCE_GROUP} ${env.STATE_STORAGE_ACCOUNT} ${env.STATE_STORAGE_CONTAINER}
+        """
+    }
+}
+
+def runDeploy(envName) {
+    withCredentials([azureServicePrincipal(
+            credentialsId: env.AZURE_CREDENTIALS,
+            subscriptionIdVariable: 'ARM_SUBSCRIPTION_ID',
+            clientIdVariable: 'ARM_CLIENT_ID',
+            clientSecretVariable: 'ARM_CLIENT_SECRET',
+            tenantIdVariable: 'ARM_TENANT_ID'
+    )]) {
+        sh label: "DEPLOY resources to AZURE", script: """
+            export PATH=${env.TERRAFORM_TOOL}:${env.PATH}
+            ./deploy.sh ${env.ARM_SUBSCRIPTION_ID} ${env.ARM_CLIENT_ID} ${env.ARM_CLIENT_SECRET} ${env.ARM_TENANT_ID} ${envName} \
+                ${env.STATE_LOCATION} ${env.STATE_RESOURCE_GROUP} ${env.STATE_STORAGE_ACCOUNT} ${env.STATE_STORAGE_CONTAINER}
+        """
+    }
+}
+
+def runTests() {
+    withCredentials([azureServicePrincipal(
+            credentialsId: env.AZURE_CREDENTIALS,
+            subscriptionIdVariable: 'ARM_SUBSCRIPTION_ID',
+            clientIdVariable: 'ARM_CLIENT_ID',
+            clientSecretVariable: 'ARM_CLIENT_SECRET',
+            tenantIdVariable: 'ARM_TENANT_ID'
+    )]) {
+        sh label: "TEST each Terraform module", script: """
+            export PATH=${env.TERRAFORM_TOOL}:${env.PATH}
+            ./test.sh ${env.ARM_SUBSCRIPTION_ID} ${env.ARM_CLIENT_ID} ${env.ARM_CLIENT_SECRET} ${env.ARM_TENANT_ID}
+        """
+    }
+}
+
+def tagBranch() {
+    withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIAL, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
+        git_url = "https://${env.GIT_USER}:${env.GIT_PASS}@${scm.getUserRemoteConfigs()[0].getUrl().substring(8)}"
+                .replace("\$", "\\\$").replace("!", "\\!")
+        sh label: "TAG code with version ${env.VERSION}", script: """
+            git config core.hooksPath .git/hooks/
+            git commit -a -m "Updating [build.properties] with ${env.VERSION}"
+            git tag -a ${env.VERSION} -m "Tagging branch [${env.BRANCH_NAME}] for ${env.VERSION}"
+            git push ${git_url} --tags
+        """
+    }
+}
+
+def getBranch() {
+    withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIAL, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
+        git_url = "https://${env.GIT_USER}:${env.GIT_PASS}@${scm.getUserRemoteConfigs()[0].getUrl().substring(8)}"
+                .replace("\$", "\\\$").replace("!", "\\!")
+        sh label: "Get code with TAG version ${env.VERSION}", script: """
+            git clone --branch ${env.VERSION} ${git_url} .
+        """
+    }
+}
+
+def sendNotification(subject, body, to = null, recipients = [], attachLog = false) {
+    emailext(
+            attachLog: attachLog,
+            mimeType: 'text/html',
+            from: env.NOTIFICATION_FROM,
+            replyTo: env.NOTIFICATION_FROM,
+            recipientProviders: recipients,
+            to: to,
+            subject: subject,
+            body: body
+    )
+}
+
+def waitToDeploy() {
+    def now = new Date()
+    int minHour = 3
+    int maxHour = 5
+    println "--- --- --- Waiting for next deployment window --- --- ---"
+    println "Deployments will be performed at set times (Monday to Thursday between ${minHour}AM and ${maxHour}AM)"
+    timeout(time: 96, unit: 'HOURS') {
+        while (!(now.hours >= minHour && now.hours <= maxHour) || (now.day == 5 || now.day == 6 || now.day == 7)) {
+            sleep(time: 60, unit: 'MINUTES')
+            now = new Date()
+        }
+    }
+}
+
+def getBuildUrl() {
+    return env.BUILD_URL.replaceFirst("/job/", "/blue/organizations/jenkins/")
+            .replaceFirst("/job/", "/detail/")
+            .replace("%252F", "%2F")
+}
+
+pipeline {
+    agent none
+
+    options {
+        disableConcurrentBuilds()
+        skipStagesAfterUnstable()
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
+        parallelsAlwaysFailFast()
+    }
+
+    environment {
+        SHARED_MODULES_BRANCH = 'latest'
+    }
+
+    //triggers {
+    //    pollSCM('H */5 * * *')
+    //}
+
+    stages {
+        stage('DEVELOP') {
+            agent { label 'docker-kitchensink-slave' }
+
+            environment {
+                AZURE_CREDENTIALS       = 'nhi-iac-uap-dev-sp-test'
+                STATE_LOCATION          = 'eastus2'
+                STATE_RESOURCE_GROUP    = 'phx-terraform-rg-dev'
+                STATE_STORAGE_ACCOUNT   = 'tfsnhi01'
+                STATE_STORAGE_CONTAINER = 'tfstatewvd'
+                BRANCH_NAME ='master'
+                TERRAFORM_TOOL = tool name: 'Terraform13', type: 'terraform'
+            }
+
+            stages {
+                stage('Generate Plan') {
+                    steps {
+                        initialise()
+                        //commment added to remove test
+                        runPlan('dev')
+                    }
+                }
+
+                //stage('Initialize and Test') {
+                //    steps {
+                         //initialise()
+                        //commment added to remove test
+                        //runTests()
+                //    }
+                //}
+
+                stage('Validate Terraform Plan') {
+                    agent none
+                    steps {
+                        timeout(time: 30, unit: 'MINUTES') {
+                            input(message: 'Apply this terraform plan?')
+                        }
+                    }
+                }
+                stage('Deploy to Environment') {
+                    when { expression { return env.BRANCH_NAME == 'master' } }
+                    steps {
+                        runDeploy('dev')
+                    }
+                }
+            }
+        }
+
+    }
+    post {
+        failure {
+            script {
+                def body = """
+                    <p>Job '<b>${env.JOB_NAME} [${env.BUILD_NUMBER}]</b>' build failure.</p>
+                    <p>Check console output at &QUOT;<a href='${getBuildUrl()}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>
+                """
+                def subject = "FAILURE: '${env.JOB_NAME} [${env.BUILD_NUMBER}]'"
+                sendNotification(subject, body, env.POST_NOTIFICATION, [requestor()], true)
+            }
+        }
+
+        fixed {
+            script {
+                def body = """
+                    <p>Job '<b>${env.JOB_NAME} [${env.BUILD_NUMBER}]</b>' has now been fixed.</p>
+                    <p>Check console output at &QUOT;<a href='${getBuildUrl()}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>
+                """
+                def subject = "FIXED: '${env.JOB_NAME} [${env.BUILD_NUMBER}]'"
+                sendNotification(subject, body, env.POST_NOTIFICATION, [requestor()], true)
+            }
+        }
+    }
+}
