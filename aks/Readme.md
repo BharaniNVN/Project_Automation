@@ -1,0 +1,11 @@
+## List of Azure Resources get provisioned after executing terraform scripts
+- Creates Azure Container Registry
+- Creates Azure Kubernetes Service
+- Creates Log anaylitics workspace for AKS
+- Creates Public IP for Application Gateway
+- Creates Azure Application Gateway
+- Creates Azure Managed Identity
+- Associates required roles between AKS and AAD using managed Identity
+- Associates required roles between AKS and KeyValut using managed Identity
+- Associates required roles between Application Gateway and AKS using manager
+- Creates Azure Key vault to store secrets and Kubernetes client connection details
